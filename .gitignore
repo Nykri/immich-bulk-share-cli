@@ -3,6 +3,13 @@
 *.xlsx
 *.numbers
 
+# Virtual Environment
+immich-bulk-share-cli/
+venv/
+env/
+.env/
+.venv/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

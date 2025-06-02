@@ -7,6 +7,41 @@ import argparse
 from pathlib import Path
 import sys
 from datetime import datetime
+import os
+
+class Config:
+    """Handle configuration storage and retrieval."""
+    
+    def __init__(self):
+        self.config_dir = os.path.expanduser("~/.config/immich-bulk-share")
+        self.config_file = os.path.join(self.config_dir, "config.json")
+        self._ensure_config_dir()
+
+    def _ensure_config_dir(self):
+        """Ensure the configuration directory exists."""
+        os.makedirs(self.config_dir, exist_ok=True)
+
+    def load(self) -> Dict[str, str]:
+        """Load configuration from file."""
+        try:
+            with open(self.config_file, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+        except json.JSONDecodeError:
+            print("Warning: Config file is corrupted. Using default values.")
+            return {}
+
+    def save(self, url: str, api_key: str):
+        """Save configuration to file."""
+        config = {
+            'url': url,
+            'api_key': api_key
+        }
+        with open(self.config_file, 'w') as f:
+            json.dump(config, f, indent=2)
+        # Secure the config file
+        os.chmod(self.config_file, 0o600)
 
 class AlbumAPIProcessor:
     """Process albums through API with capabilities to list, add, update, and remove users."""
@@ -14,8 +49,11 @@ class AlbumAPIProcessor:
     COL_ALBUM_NAME = 'AlbumName'
     COL_ALBUM_ID = 'AlbumId'
     COL_ROLE = 'Role'
+    COL_FIRST_PHOTO = 'FirstPhoto'
+    COL_LAST_PHOTO = 'LastPhoto'
+    COL_PHOTO_COUNT = 'Photos'
 
-    def __init__(self, base_url: str, api_key: str):
+    def __init__(self, base_url: str, api_key: str, dry_run: bool = False):
         """Initialize the API processor with base URL and authentication."""
         self.base_url = self._validate_and_adjust_url(base_url)
         self.api_key = api_key
@@ -24,6 +62,7 @@ class AlbumAPIProcessor:
             'x-api-key': self.api_key
         }
         self.user_email_to_id = {}  # Cache for email to ID mapping
+        self.dry_run = dry_run
 
     def _validate_and_adjust_url(self, url: str) -> str:
         """Validate URL and switch to HTTPS if HTTP is used."""
@@ -31,9 +70,9 @@ class AlbumAPIProcessor:
             raise ValueError("Invalid URL provided. Ensure it starts with http:// or https://.")
         
         parsed_url = requests.utils.urlparse(url)
-        if parsed_url.scheme == 'http':
-            print("Warning: Switching to HTTPS for security.")
-            url = parsed_url._replace(scheme='https').geturl()
+        # if parsed_url.scheme == 'http':
+        #     print("Warning: Switching to HTTPS for security.")
+        #     url = parsed_url._replace(scheme='https').geturl()
         
         # Check server reachability
         try:
@@ -46,6 +85,23 @@ class AlbumAPIProcessor:
             sys.exit("Error: The server took too long to respond.")
         
         return url.rstrip('/')
+
+    def test_connection(self) -> bool:
+        """Test the connection to the server and validate credentials."""
+        try:
+            # Try to fetch albums as a connection test - we know this endpoint works
+            url = f"{self.base_url}/api/albums"
+            response = requests.get(url, headers=self.headers, timeout=5)
+            response.raise_for_status()
+            print("✓ Successfully connected to Immich server")
+            return True
+        except requests.exceptions.RequestException as e:
+            print(f"✗ Failed to connect to server: {str(e)}")
+            if "401" in str(e):
+                print("  The API key appears to be invalid")
+            elif "Connection refused" in str(e):
+                print("  Please check if the server URL is correct and the server is running")
+            return False
 
     def get_albums(self) -> List[Dict]:
         """Fetch all albums from the API."""
@@ -60,7 +116,7 @@ class AlbumAPIProcessor:
 
     def get_album_details(self, album_id: str) -> Optional[Dict]:
         """Fetch detailed information about a specific album."""
-        url = f"{self.base_url}/api/albums/{album_id}?withoutAssets=true"
+        url = f"{self.base_url}/api/albums/{album_id}"  # Get album with assets
         try:
             response = requests.get(url, headers=self.headers, timeout=5)
             response.raise_for_status()
@@ -68,6 +124,22 @@ class AlbumAPIProcessor:
         except requests.exceptions.RequestException as e:
             print(f"Error fetching album details for {album_id}: {e}")
             return None
+
+    def get_first_photo_date(self, album_id: str) -> str:
+        """Get the date of the first photo in an album."""
+        album_details = self.get_album_details(album_id)
+        if not album_details or 'assets' not in album_details or not album_details['assets']:
+            return ''
+        
+        # Try to find the earliest date from the assets
+        try:
+            # Get all valid dates and sort them
+            dates = [asset.get('fileCreatedAt', '') for asset in album_details['assets']]
+            dates = [d for d in dates if d]  # Remove empty dates
+            return min(dates) if dates else ''  # Get earliest date
+        except Exception as e:
+            print(f"Error getting first photo date for album {album_id}: {e}")
+            return ''
 
     def get_users(self) -> Dict[str, str]:
         """Fetch all users and create email to ID mapping."""
@@ -93,8 +165,11 @@ class AlbumAPIProcessor:
 
     def share_album_with_user(self, album_id: str, user_id: str, role: str) -> bool:
         """Share an album with a user or update their role."""
+        if self.dry_run:
+            print(f"[DRY RUN] Would share album {album_id} with user {user_id} (role: {role})")
+            return True
+
         url = f"{self.base_url}/api/albums/{album_id}/users"
-        
         headers = {**self.headers, 'Content-Type': 'application/json'}
         payload = {
             "albumUsers": [
@@ -115,6 +190,10 @@ class AlbumAPIProcessor:
 
     def remove_user_from_album(self, album_id: str, user_id: str) -> bool:
         """Remove a user from an album."""
+        if self.dry_run:
+            print(f"[DRY RUN] Would remove user {user_id} from album {album_id}")
+            return True
+
         url = f"{self.base_url}/api/albums/{album_id}/user/{user_id}"
         try:
             response = requests.delete(url, headers=self.headers, timeout=5)
@@ -138,6 +217,45 @@ class AlbumAPIProcessor:
                 current_users[email] = role
         return current_users
 
+    def format_date(self, date_str: str) -> str:
+        """Format ISO date string to a spreadsheet-friendly format."""
+        if not date_str:
+            return ''
+        try:
+            # Parse ISO format date
+            dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            # Format as YYYY-MM-DD HH:MM which is easily sortable in spreadsheets
+            return dt.strftime('%Y-%m-%d %H:%M')
+        except Exception:
+            return date_str
+
+    def get_album_stats(self, album_id: str) -> Dict[str, str]:
+        """Get album statistics including date range and photo count."""
+        album_details = self.get_album_details(album_id)
+        stats = {
+            'first_photo': '',
+            'last_photo': '',
+            'photo_count': 0
+        }
+        
+        if not album_details or 'assets' not in album_details or not album_details['assets']:
+            return stats
+        
+        try:
+            # Get all valid dates
+            dates = [asset.get('fileCreatedAt', '') for asset in album_details['assets']]
+            dates = [d for d in dates if d]  # Remove empty dates
+            
+            if dates:
+                stats['first_photo'] = self.format_date(min(dates))
+                stats['last_photo'] = self.format_date(max(dates))
+            
+            stats['photo_count'] = len(album_details['assets'])
+            return stats
+        except Exception as e:
+            print(f"Error getting album stats for album {album_id}: {e}")
+            return stats
+
     def process_albums_to_csv(self, output_file: str = None):
         """Process all albums and create a CSV export."""
         print("Fetching albums...")
@@ -151,6 +269,14 @@ class AlbumAPIProcessor:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_file = f"albums_{timestamp}.csv"
 
+        if self.dry_run:
+            print("\n[DRY RUN] Would create CSV with the following data:")
+            print(f"Number of albums: {len(albums)}")
+            print("First 3 albums as preview:")
+            for album in albums[:3]:
+                print(f"- {album.get('albumName', '')} ({album.get('id', '')})")
+            return
+
         processed_albums = []
         total_albums = len(albums)
         
@@ -163,11 +289,17 @@ class AlbumAPIProcessor:
             album_id = album.get('id', '')
             album_users = album.get('albumUsers', [])
             
+            # Get album statistics
+            stats = self.get_album_stats(album_id)
+            
             if not album_users:
                 processed_albums.append({
                     'name': album_name,
                     'id': album_id,
                     'role': '',
+                    'first_photo': stats['first_photo'],
+                    'last_photo': stats['last_photo'],
+                    'photo_count': stats['photo_count'],
                     'users': []
                 })
             else:
@@ -186,14 +318,27 @@ class AlbumAPIProcessor:
                         'name': album_name,
                         'id': album_id,
                         'role': role,
+                        'first_photo': stats['first_photo'],
+                        'last_photo': stats['last_photo'],
+                        'photo_count': stats['photo_count'],
                         'users': users
                     })
+
+        # Sort albums by first photo date (newest first)
+        processed_albums.sort(key=lambda x: x['first_photo'] or '0000', reverse=True)  # Albums without dates go to the end
 
         max_users = max(len(album['users']) for album in processed_albums) if processed_albums else 0
 
         with open(output_file, 'w', newline='', encoding='utf-8') as f:
-            headers = [self.COL_ALBUM_NAME, self.COL_ALBUM_ID, self.COL_ROLE] + \
-                     [f'User {i+1}' for i in range(max_users)]
+            headers = [
+                self.COL_ALBUM_NAME, 
+                self.COL_ALBUM_ID, 
+                self.COL_FIRST_PHOTO,
+                self.COL_LAST_PHOTO,
+                self.COL_PHOTO_COUNT,
+                self.COL_ROLE
+            ] + [f'User {i+1}' for i in range(max_users)]
+            
             writer = csv.writer(f, delimiter=';')
             writer.writerow(headers)
 
@@ -201,13 +346,17 @@ class AlbumAPIProcessor:
                 row = [
                     album['name'],
                     album['id'],
+                    album['first_photo'],
+                    album['last_photo'],
+                    album['photo_count'],
                     album['role']
                 ] + album['users'] + [''] * (max_users - len(album['users']))
                 writer.writerow(row)
-
-        print(f"Created CSV file: {output_file}")
-        print(f"Processed {len(albums)} albums into {len(processed_albums)} entries.")
-        print(f"Maximum number of users in any album: {max_users}")
+        
+        print(f"\nCSV file created: {output_file}")
+        print(f"Total albums processed: {len(processed_albums)}")
+        print("Albums are sorted by first photo date (newest first)")
+        print("Columns: Album Name, ID, First Photo, Last Photo, Photo Count, Role, Users...")
 
     def process_share_albums(self, input_file: str):
         """Process CSV file and synchronize album sharing permissions."""
@@ -216,7 +365,12 @@ class AlbumAPIProcessor:
             self.user_email_to_id = self.get_users()
 
             with open(input_file, 'r', newline='', encoding='utf-8') as f:
-                reader = csv.reader(f, delimiter=';')
+                # Try both comma and semicolon as delimiters
+                sample = f.readline()
+                delimiter = ';' if ';' in sample else ','
+                f.seek(0)  # Reset file pointer to start
+                
+                reader = csv.reader(f, delimiter=delimiter)
                 headers = next(reader)
                 
                 # print("Debug: CSV Headers found:", headers)
@@ -225,7 +379,9 @@ class AlbumAPIProcessor:
                     name_idx = headers.index(self.COL_ALBUM_NAME)
                     id_idx = headers.index(self.COL_ALBUM_ID)
                     role_idx = headers.index(self.COL_ROLE)
-                    user_indices = range(3, len(headers))
+                    # Find the index where user columns start
+                    user_start_idx = next(i for i, h in enumerate(headers) if h.startswith('User '))
+                    user_indices = range(user_start_idx, len(headers))
                 except ValueError as e:
                     print(f"Error: Invalid CSV format. Required columns not found.")
                     print(f"Expected columns: {self.COL_ALBUM_NAME}, {self.COL_ALBUM_ID}, {self.COL_ROLE}")
@@ -333,27 +489,68 @@ def main():
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(description='Process and share albums via API.')
 
-    parser.add_argument('command', choices=['list-all', 'share-albums'], 
-                      nargs='?', help='Command to execute (list-all or share-albums)')
-    parser.add_argument('--url', help='Base URL for the API')
-    parser.add_argument('--api-key', help='API key for authentication')
-    parser.add_argument('--output', help='Output CSV file name (for list-all)')
-    parser.add_argument('--input', help='Input CSV file name (for share-albums)')
+    # Create subparsers for different commands
+    subparsers = parser.add_subparsers(dest='command', help='Command to execute')
+    
+    # List albums command
+    list_parser = subparsers.add_parser('list-all', help='List all albums and their sharing permissions')
+    list_parser.add_argument('--url', help='Base URL for the API')
+    list_parser.add_argument('--api-key', help='API key for authentication')
+    list_parser.add_argument('--output', help='Output CSV file name')
+    list_parser.add_argument('--dry-run', action='store_true', help='Show what would be done without making changes')
+
+    # Share albums command
+    share_parser = subparsers.add_parser('share-albums', help='Update album sharing permissions from CSV')
+    share_parser.add_argument('--url', help='Base URL for the API')
+    share_parser.add_argument('--api-key', help='API key for authentication')
+    share_parser.add_argument('--input', help='Input CSV file name', required=True)
+    share_parser.add_argument('--dry-run', action='store_true', help='Show what would be done without making changes')
+
+    # Login command
+    login_parser = subparsers.add_parser('login', help='Save and validate API credentials for future use')
+    login_parser.add_argument('--url', help='Base URL for the API', required=True)
+    login_parser.add_argument('--api-key', help='API key for authentication', required=True)
+    login_parser.add_argument('--dry-run', action='store_true', help='Test connection without saving credentials')
     
     args = parser.parse_args()
 
-    if not args.command or not args.url or not args.api_key:
+    if not args.command:
         parser.print_help()
         sys.exit(1)
 
-    processor = AlbumAPIProcessor(args.url, args.api_key)
+    # Handle login command
+    config = Config()
+    if args.command == 'login':
+        # Test connection before saving credentials
+        processor = AlbumAPIProcessor(args.url, args.api_key, dry_run=args.dry_run)
+        if processor.test_connection():
+            if not args.dry_run:
+                config.save(args.url, args.api_key)
+                print(f"Configuration saved to {config.config_file}")
+            else:
+                print("[DRY RUN] Would save configuration to {config.config_file}")
+            sys.exit(0)
+        else:
+            print("Login failed: Could not connect to server or invalid credentials")
+            sys.exit(1)
+
+    # Load saved configuration
+    saved_config = config.load()
+    
+    # Use command line arguments if provided, otherwise use saved configuration
+    url = args.url if hasattr(args, 'url') and args.url else saved_config.get('url')
+    api_key = args.api_key if hasattr(args, 'api_key') and args.api_key else saved_config.get('api_key')
+
+    if not url or not api_key:
+        print("Error: API URL and key are required. Either provide them as arguments or login using:")
+        print("  python album_processor.py login --url URL --api-key API_KEY")
+        sys.exit(1)
+
+    processor = AlbumAPIProcessor(url, api_key, dry_run=args.dry_run)
 
     if args.command == 'list-all':
         processor.process_albums_to_csv(args.output)
     elif args.command == 'share-albums':
-        if not args.input:
-            print("Error: --input file is required for share-albums command")
-            sys.exit(1)
         processor.process_share_albums(args.input)
     else:
         parser.print_help()
