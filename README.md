@@ -9,6 +9,7 @@ Python script for managing album sharing permissions via Immich API. Supports li
 - Automatic credential storage
 - Dry-run mode for safe testing
 - Support for both comma and semicolon delimited CSV files
+- Configurable output verbosity with progress tracking
 
 ## Requirements
 
@@ -23,45 +24,73 @@ pip install requests
 
 ## Usage
 
-### First Time Setup
+The script provides three main commands: `login`, `list-all`, and `share-albums`. Here's the basic CLI help:
 
-Save your API credentials (they will be stored securely in `~/.config/immich-bulk-share`):
+```
+usage: album_processor.py [-h] {list-all,share-albums,login} ...
 
-```bash
-python album_processor.py login --url https://your-immich-server --api-key YOUR_API_KEY
+Process and share albums via API.
+
+positional arguments:
+  {list-all,share-albums,login}
+                        Command to execute
+    list-all            List all albums and their sharing permissions
+    share-albums        Update album sharing permissions from CSV
+    login               Save and validate API credentials for future use
+
+options:
+  -h, --help            show this help message and exit
 ```
 
-Test connection without saving credentials:
+### Authentication (`login`)
+
+Before using the script, you need to configure your API credentials. They will be stored securely in `~/.config/immich-bulk-share`.
+
 ```bash
+# Save credentials
+python album_processor.py login --url https://your-immich-server --api-key YOUR_API_KEY
+
+# Test connection without saving credentials
 python album_processor.py login --url https://your-immich-server --api-key YOUR_API_KEY --dry-run
 ```
 
-### List Albums and Permissions
+### Listing Albums (`list-all`)
 
-Export all albums and their sharing permissions to CSV:
+The `list-all` command exports all albums and their sharing permissions to a CSV file.
 
 ```bash
-python album_processor.py list-all [--output albums.csv] [--dry-run]
-```
+# Export to default filename (albums_YYYYMMDD_HHMMSS.csv)
+python album_processor.py list-all
 
-If no output file is specified, creates `albums_YYYYMMDD_HHMMSS.csv`
+# Export to specific filename
+python album_processor.py list-all --output albums.csv
 
-Preview what would be exported:
-```bash
+# Preview what would be exported
 python album_processor.py list-all --dry-run
 ```
 
-### Update Sharing Permissions
+### Managing Shares (`share-albums`)
 
-Update album sharing permissions from CSV:
+The `share-albums` command updates album sharing permissions from a CSV file.
 
 ```bash
-python album_processor.py share-albums --input albums.csv [--dry-run]
+# Update sharing permissions
+python album_processor.py share-albums --input albums.csv
+
+# Preview changes without applying them
+python album_processor.py share-albums --input albums.csv --dry-run
+
+# Update with minimal output (progress only)
+python album_processor.py share-albums --input albums.csv --disable-verbose
 ```
 
-Preview sharing changes without applying them:
+Control output verbosity (defaults to verbose):
 ```bash
-python album_processor.py share-albums --input albums.csv --dry-run
+# Disable verbose output - shows only progress counter
+python album_processor.py share-albums --input albums.csv --disable-verbose
+
+# Default verbose output - shows detailed information for each album
+python album_processor.py share-albums --input albums.csv
 ```
 
 ## CSV Format
