@@ -157,18 +157,18 @@ class AlbumAPIProcessor:
                 if email and user_id:
                     email_to_id[email.lower()] = user_id  # Store emails in lowercase
             
-            print(f"Loaded {len(email_to_id)} user email-ID mappings")
+            print(f"Loaded {len(email_to_id)} user email-ID mappings\n")
             return email_to_id
         except requests.exceptions.RequestException as e:
             print(f"Error fetching users: {e}")
             sys.exit(1)
 
-    def share_album_with_user(self, album_id: str, user_id: str, role: str) -> bool:
+    def share_album_with_user(self, album_id: str, user_id: str, role: str, email: str) -> bool:
         """Share an album with a user or update their role."""
         if self.dry_run:
-            print(f"[DRY RUN] Would share album {album_id} with user {user_id} (role: {role})")
             return True
 
+        print(f"Updating/Adding user {email} with role {role}")
         url = f"{self.base_url}/api/albums/{album_id}/users"
         headers = {**self.headers, 'Content-Type': 'application/json'}
         payload = {
@@ -285,7 +285,8 @@ class AlbumAPIProcessor:
             if index % 10 == 0:  # Progress indicator every 10 albums
                 print(f"Processing album {index}/{total_albums}")
                 
-            album_name = album.get('albumName', '')
+            # Ensure there is no semicolon in the album name otherwise the CSV will be corrupted
+            album_name = album.get('albumName', '').replace(';', ',')
             album_id = album.get('id', '')
             album_users = album.get('albumUsers', [])
             
@@ -358,22 +359,17 @@ class AlbumAPIProcessor:
         print("Albums are sorted by first photo date (newest first)")
         print("Columns: Album Name, ID, First Photo, Last Photo, Photo Count, Role, Users...")
 
-    def process_share_albums(self, input_file: str):
+    def process_share_albums(self, input_file: str, verbose: bool = True):
         """Process CSV file and synchronize album sharing permissions."""
         try:
-            print("Fetching user email to ID mapping...")
-            self.user_email_to_id = self.get_users()
-
             with open(input_file, 'r', newline='', encoding='utf-8') as f:
-                # Try both comma and semicolon as delimiters
+                # Try both comma, semicolon and tab as delimiters
                 sample = f.readline()
-                delimiter = ';' if ';' in sample else ','
+                delimiter = ';' if ';' in sample else ',' if ',' in sample else '\t'
                 f.seek(0)  # Reset file pointer to start
                 
                 reader = csv.reader(f, delimiter=delimiter)
                 headers = next(reader)
-                
-                # print("Debug: CSV Headers found:", headers)
                 
                 try:
                     name_idx = headers.index(self.COL_ALBUM_NAME)
@@ -418,19 +414,28 @@ class AlbumAPIProcessor:
                             email = row[i].strip().lower()
                             if email:
                                 album_data[album_id]['users'].add((email, role))
+                print(f"Found {len(album_data)} albums to process\n")
+
+                
+                print("Fetching user email to ID mapping...")
+                self.user_email_to_id = self.get_users()
 
                 # Process each album
-                for album_id, data in album_data.items():
+                for album_idx, (album_id, data) in enumerate(album_data.items(), 1):
                     stats['total_albums'] += 1
                     
                     # Get album details for name
                     album_details = self.get_album_details(album_id)
                     album_name = album_details.get('albumName', 'Unknown Album') if album_details else 'Unknown Album'
-                    print(f"\nProcessing album: {album_name} ({album_id})")
                     
                     # Get current users
                     current_users = self.get_current_album_users(album_id)
-                    print(f"Current users in album: {len(current_users)}")
+                    
+                    if verbose:
+                        print(f"\nProcessing album: {album_name} ({album_id})")
+                        print(f"Current users in album: {len(current_users)}")
+                    elif album_idx == 1 or album_idx % 10 == 0 or album_idx == len(album_data):
+                        print(f"\r{self.dry_run and '[DRY RUN] ' or ''}Processing albums: {album_idx}/{len(album_data)}", end='', flush=True)
 
                     # Determine users to remove
                     desired_users = {email for email, _ in data['users']}
@@ -440,22 +445,27 @@ class AlbumAPIProcessor:
                     for email in users_to_remove:
                         user_id = self.user_email_to_id.get(email)
                         if user_id:
-                            print(f"Removing user {email} from album {album_id}")
+                            if verbose and self.dry_run:
+                                print(f"{self.dry_run and '[DRY RUN] Would remove' or 'Removing'} user {email} from album {album_id}")
                             if self.remove_user_from_album(album_id, user_id):
                                 stats['users_removed'] += 1
-                                print(f"Successfully removed {email}")
+                                if verbose:
+                                    print(f"Successfully removed {email}")
                             else:
                                 stats['removal_failures'] += 1
-                                print(f"Failed to remove {email}")
+                                if verbose:
+                                    print(f"Failed to remove {email}")
 
                     # Add or update authorized users
                     for email, role in data['users']:
                         user_id = self.user_email_to_id.get(email)
                         if user_id:
                             current_role = current_users.get(email)
-                            if current_role != role:
-                                print(f"Updating/Adding user {email} with role {role}")
-                                if self.share_album_with_user(album_id, user_id, role):
+                            if verbose and self.dry_run:
+                                print(f"[DRY RUN] Would {'update' if current_role else 'add'} user {email} with role {role}")
+                            elif current_role != role:
+                                print(f"Updating user {email} with role {role}")
+                                if self.share_album_with_user(album_id, user_id, role, email):
                                     stats['successful_shares'] += 1
                                 else:
                                     stats['failed_shares'] += 1
@@ -464,7 +474,7 @@ class AlbumAPIProcessor:
                             stats['failed_shares'] += 1
 
                 # Print final statistics
-                print("\nOperation completed:")
+                print(f"\n\n{self.dry_run and '[DRY RUN] ' or ''}Operation completed:")
                 print(f"Total albums processed: {stats['total_albums']}")
                 print(f"Successful shares/updates: {stats['successful_shares']}")
                 print(f"Failed shares/updates: {stats['failed_shares']}")
@@ -494,17 +504,14 @@ def main():
     
     # List albums command
     list_parser = subparsers.add_parser('list-all', help='List all albums and their sharing permissions')
-    list_parser.add_argument('--url', help='Base URL for the API')
-    list_parser.add_argument('--api-key', help='API key for authentication')
     list_parser.add_argument('--output', help='Output CSV file name')
     list_parser.add_argument('--dry-run', action='store_true', help='Show what would be done without making changes')
 
     # Share albums command
     share_parser = subparsers.add_parser('share-albums', help='Update album sharing permissions from CSV')
-    share_parser.add_argument('--url', help='Base URL for the API')
-    share_parser.add_argument('--api-key', help='API key for authentication')
     share_parser.add_argument('--input', help='Input CSV file name', required=True)
     share_parser.add_argument('--dry-run', action='store_true', help='Show what would be done without making changes')
+    share_parser.add_argument('--disable-verbose', action='store_false', default=True, help='Show detailed output for each album (default: True)')
 
     # Login command
     login_parser = subparsers.add_parser('login', help='Save and validate API credentials for future use')
@@ -551,7 +558,7 @@ def main():
     if args.command == 'list-all':
         processor.process_albums_to_csv(args.output)
     elif args.command == 'share-albums':
-        processor.process_share_albums(args.input)
+        processor.process_share_albums(args.input, args.disable_verbose)
     else:
         parser.print_help()
         sys.exit(1)
